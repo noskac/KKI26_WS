@@ -42,8 +42,13 @@ class ROVControlStation:
         rospy.Subscriber('/rov/qr_data', String, self.qr_callback)
         rospy.Subscriber('/rov/imu_euler', Vector3, self.imu_callback)
         rospy.Subscriber('/rov/depth', Float32, self.depth_callback)
+        
         # Tambahan: Subscriber untuk baca nilai PWM thruster (Array isi 6 angka)
         rospy.Subscriber('/rov/thruster_pwm', Int32MultiArray, self.pwm_callback)
+        
+        # SUBSCRIBER BARU UNTUK MODE SYSTEM
+        rospy.Subscriber('/rov/system_mode', String, self.mode_callback)
+        self.current_system_mode = "MENUNGGU BRIDGE..."
 
         # --- KONFIGURASI LAYOUT GRID (Responsif) ---
         self.root.grid_columnconfigure(0, weight=1)
@@ -155,13 +160,20 @@ class ROVControlStation:
         self.footer_frame.grid(row=3, column=0, columnspan=3, sticky="ew", padx=10, pady=5)
         # Indikator diubah ke ONLINE untuk versi ROS
         status_text = " Mode: MANUAL (Remote)   |   Connection: ONLINE   |   Sensor Status: OK   |   Logging: STANDBY "
-        tk.Label(self.footer_frame, text=status_text, bg="#1e1e1e", fg="orange", font=("Courier", 10, "bold")).pack(pady=8)
+        
+        # PERBAIKAN DI SINI: Tetapkan ke self.status_label agar bisa di-update
+        self.status_label = tk.Label(self.footer_frame, text=status_text, bg="#1e1e1e", fg="orange", font=("Courier", 10, "bold"))
+        self.status_label.pack(pady=8)
 
         self.update_gui()
 
     # ==========================================
     # FUNGSI CALLBACK ROS
     # ==========================================
+        
+    def mode_callback(self, msg):
+        self.current_system_mode = msg.data
+
     def image_callback(self, msg):
         try:
             cv_image = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, -1)
@@ -215,6 +227,17 @@ class ROVControlStation:
                 self.cam1_label.configure(image=img1)
             except Exception as e:
                 pass
+
+        # 3. Update Footer (Mode System)
+        # Memastikan variabel sudah diinisialisasi agar tidak error saat pertama kali jalan
+        if hasattr(self, 'current_system_mode') and hasattr(self, 'status_label'):
+            status_text = f" Mode: {self.current_system_mode}   |   Connection: ONLINE   |   Sensor Status: OK "
+            
+            # Ganti warna jika sedang mode Auto
+            if "AUTO" in self.current_system_mode:
+                self.status_label.config(text=status_text, fg="#ff00ff") # Warna ungu/pink
+            else:
+                self.status_label.config(text=status_text, fg="orange")
 
         # 3. Update Teks QR
         if self.current_qr_data != "Menunggu..." and self.current_qr_data != "Belum terdeteksi":

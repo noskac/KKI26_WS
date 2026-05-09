@@ -23,20 +23,26 @@ class ThrusterBridge:
             rospy.logerr(f"[BRIDGE] Gagal membuka serial {port}: {e}")
             self.ser = None
 
-        # ================= ROS PUBLISHER & SUBSCRIBER =================
+        # ================= ROS PUBLISHER =================
         self.imu_pub = rospy.Publisher('/rov/imu_euler', Vector3, queue_size=10)
         self.depth_pub = rospy.Publisher('/rov/depth', Float32, queue_size=10)
+        self.mode_pub = rospy.Publisher('/rov/system_mode', String, queue_size=10)
+        
+        # Publisher BARU untuk mengirim data PWM ke GUI
         self.pwm_pub = rospy.Publisher('/rov/thruster_pwm', Int32MultiArray, queue_size=10)
+        
+        # ================= ROS SUBSCRIBER =================
+        rospy.Subscriber('/rov/auto_cmd', Int32MultiArray, self.auto_ai_callback)
 
         # ================= STATE KENDALI =================
-        self.mode = 1  # 1: Manual, 2: Disable, 3: Auto AI
+        self.mode = 1  # 1: Manual, 2: Auto AI
         
-        # Nilai Sumbu [S, Y, H, R, T]
-        self.num_motions = 5
-        self.target_motion = [1500, 1500, 1500, 1500, 1500]
-        self.current_motion = [1500, 1500, 1500, 1500, 1500]
+        # Array berisi 7 Elemen: [S, Y, H, R, T, TiltArm, Gripper]
+        self.num_motions = 7
+        self.target_motion = [1500, 1500, 1500, 1500, 1500, 0, 90]
+        self.current_motion = [1500, 1500, 1500, 1500, 1500, 0, 90]
         
-        self.ramp_step = 40           
+        self.ramp_step = 20
         self.ramp_delay = 1.0 / 90.0     
         self.running = True
         self.pressed_keys = set()
@@ -56,30 +62,29 @@ class ThrusterBridge:
         self.keyboard_thread.start()
         self.udp_thread.start()
         
-        rospy.loginfo("[BRIDGE] Sistem siap! Menerima input dari Keyboard (Jetson) dan UDP Gamepad (Laptop).")
+        rospy.loginfo("[BRIDGE] Sistem siap! Mode: MANUAL.")
 
     # ================= LOGIKA MODE =================
     def set_mode(self, new_mode):
         if self.mode == new_mode: return
         self.mode = new_mode
         
-        if self.mode == 1: rospy.loginfo("[BRIDGE] MODE 1: MANUAL KONTROL")
-        elif self.mode == 2:
-            rospy.logwarn("[BRIDGE] MODE 2: DISABLED (SAFETY CUT-OFF)")
-            self.target_motion = [1500] * self.num_motions
-            self.current_motion = [1500] * self.num_motions
-            self.send_serial_to_teensy()
-        elif self.mode == 3: rospy.loginfo("[BRIDGE] MODE 3: AUTO AI")
+        if self.mode == 1: 
+            rospy.loginfo("[BRIDGE] MODE 1: MANUAL KONTROL")
+        elif self.mode == 2: 
+            rospy.loginfo("[BRIDGE] MODE 2: AUTO AI MENGAMBIL ALIH")
+            # Auto-Brake (Hanya mereset 5 thruster baling-baling)
+            self.target_motion[0:5] = [1500, 1500, 1500, 1500, 1500]
 
     def auto_ai_callback(self, msg):
-        if self.mode == 3 and len(msg.data) == self.num_motions:
-            self.target_motion = list(msg.data)
+        if self.mode == 2 and len(msg.data) >= 5:
+            self.target_motion[0:5] = list(msg.data[0:5])
 
-    # ================= UDP SERVER LOOP (MENERIMA DARI LAPTOP) =================
+    # ================= UDP SERVER LOOP =================
     def udp_server_loop(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(("0.0.0.0", self.udp_port))
-        sock.settimeout(0.5) # Timeout 0.5 detik untuk FAILSAFE
+        sock.settimeout(0.5) 
         
         rospy.loginfo(f"[UDP] Menunggu data Gamepad di port {self.udp_port}...")
         
@@ -88,22 +93,23 @@ class ThrusterBridge:
                 data, addr = sock.recvfrom(1024)
                 self.udp_last_recv_time = time.time()
                 
-                if self.mode == 1 and not self.pressed_keys: 
-                    # Jika ada tombol keyboard lokal ditekan, keyboard override gamepad sementara
-                    vals = data.decode('utf-8').split(',')
-                    if len(vals) == 5:
-                        self.target_motion = [int(v) for v in vals]
+                vals = data.decode('utf-8').split(',')
+                if len(vals) == 8: 
+                    self.set_mode(int(vals[7]))
+                    
+                    if self.mode == 1 and not self.pressed_keys: 
+                        self.target_motion = [int(v) for v in vals[:7]]
                         
             except socket.timeout:
-                # FAILSAFE: Jika laptop disconnect / kabel LAN copot, hentikan pergerakan!
                 if self.mode == 1 and not self.pressed_keys and (time.time() - self.udp_last_recv_time) > 0.5:
-                    self.target_motion = [1500, 1500, 1500, 1500, 1500]
+                    # Failsafe Timeout: Hanya me-reset 5 baling-baling, servo menahan posisi
+                    self.target_motion[0:5] = [1500, 1500, 1500, 1500, 1500]
 
     # ================= KEYBOARD FALLBACK =================
     def keyboard_listener(self):
         def on_press(key):
             try:
-                if hasattr(key, 'char') and key.char in ['1', '2', '3']:
+                if hasattr(key, 'char') and key.char in ['1', '2']:
                     self.set_mode(int(key.char))
                     return
                 if self.mode != 1: return 
@@ -139,14 +145,24 @@ class ThrusterBridge:
         if '8' in self.pressed_keys: t = 1500 + step
         elif '5' in self.pressed_keys: t = 1500 - step
         
-        self.target_motion = [s, y, h, r, t]
+        # 1. Update 5 Baling-baling
+        self.target_motion[0:5] = [s, y, h, r, t]
 
-    # ================= RAMPING & TRANSMISI KE TEENSY =================
+        # 2. Update Gripper (Hold Position)
+        if 'g' in self.pressed_keys: self.target_motion[6] = 180
+        elif 'b' in self.pressed_keys: self.target_motion[6] = 0
+        else: self.target_motion[6] = self.current_motion[6]
+
+        # 3. Update Tilt Arm (Hold Position)
+        if '+' in self.pressed_keys or '=' in self.pressed_keys: self.target_motion[5] = 180
+        elif '-' in self.pressed_keys: self.target_motion[5] = 0
+        else: self.target_motion[5] = self.current_motion[5]
+
+    # ================= RAMPING & TRANSMISI =================
     def ramping_loop(self):
         while self.running and not rospy.is_shutdown():
-            if self.mode == 2:
-                time.sleep(self.ramp_delay)
-                continue
+            if self.mode == 1: self.mode_pub.publish("MANUAL (Remote)")
+            elif self.mode == 2: self.mode_pub.publish("AUTO AI (Standby)")
             
             changed = False
             for i in range(self.num_motions):
@@ -164,69 +180,62 @@ class ThrusterBridge:
 
     def send_serial_to_teensy(self):
         if self.ser:
-            # Ekstrak nilai dari array current_motion
-            s, y, h, r, t = self.current_motion
-            
-            # Susun string sesuai format parser C++ (S:val,Y:val,H:val,R:val,T:val\n)
-            cmd = f"S:{s},Y:{y},H:{h},R:{r},T:{t}\n"
-            
+            # Kirim Format: M:S,Y,H,R,T,TiltArm,Gripper
+            cmd = "M:" + ",".join(map(str, self.current_motion)) + "\n"
             self.ser.write(cmd.encode('utf-8'))
 
-    # ================= BACA SENSOR DARI TEENSY =================
+    # ================= BACA SENSOR & PWM DARI TEENSY =================
     def serial_loop(self):
         while self.running and not rospy.is_shutdown():
             try:
-                # Ganti 'if' menjadi 'while' di dalam sini untuk menguras isi buffer
-                while self.ser and self.ser.in_waiting > 0:
+                if self.ser and self.ser.in_waiting > 0:
                     line = self.ser.readline().decode('utf-8', errors='ignore').strip()
                     
-                    if not line: continue
-                    
-                    # 1. PARSING DATA SENSOR
+                    # 1. Parsing Sensor (IMU & Depth)
                     if line.startswith("P:"):
                         parts = line.split()
                         if len(parts) >= 4:
                             try:
-                                p_val = float(parts[0].split(":")[1])
-                                r_val = float(parts[1].split(":")[1])
-                                y_val = float(parts[2].split(":")[1])
-                                d_val = float(parts[3].split(":")[1])
-                                
-                                self.imu_pub.publish(Vector3(x=p_val, y=r_val, z=y_val))
-                                self.depth_pub.publish(Float32(data=d_val))
-                            except ValueError: pass
-                                
-                    # 2. PARSING DATA PWM
-                    elif line.startswith("PWM "):
+                                imu_msg = Vector3(
+                                    x=float(parts[0].split(":")[1]), 
+                                    y=float(parts[1].split(":")[1]), 
+                                    z=float(parts[2].split(":")[1])
+                                )
+                                self.imu_pub.publish(imu_msg)
+                                self.depth_pub.publish(Float32(float(parts[3].split(":")[1])))
+                            except ValueError: pass 
+
+                    # 2. Parsing Output PWM Asli dari Teensy -> Kirim ke GUI
+                    elif line.startswith("PWM DKIRI:"):
+                        # Contoh Format dari Teensy: PWM DKIRI:1500 DKANAN:1500 BKIRI:1500 BKANAN:1500 TBKIRI:1500 TBKANAN:1500
                         parts = line.replace("PWM ", "").split()
                         if len(parts) == 6:
                             try:
-                                dkiri = int(parts[0].split(":")[1])
-                                dkanan = int(parts[1].split(":")[1])
-                                bkiri = int(parts[2].split(":")[1])
-                                bkanan = int(parts[3].split(":")[1])
-                                tbkiri = int(parts[4].split(":")[1])
-                                tbkanan = int(parts[5].split(":")[1])
+                                d_kiri  = int(parts[0].split(":")[1])
+                                d_kanan = int(parts[1].split(":")[1])
+                                b_kiri  = int(parts[2].split(":")[1])
+                                b_kanan = int(parts[3].split(":")[1])
+                                t_kiri  = int(parts[4].split(":")[1]) # TBKIRI
+                                t_kanan = int(parts[5].split(":")[1]) # TBKANAN
                                 
+                                # Mengurutkan sesuai susunan di callback GUI: 
+                                # [DKIRI, TKIRI, BKIRI, DKANAN, TKANAN, BKANAN]
                                 pwm_msg = Int32MultiArray()
-                                pwm_msg.data = [dkiri, tbkiri, bkiri, dkanan, tbkanan, bkanan]
+                                pwm_msg.data = [d_kiri, t_kiri, b_kiri, d_kanan, t_kanan, b_kanan]
                                 self.pwm_pub.publish(pwm_msg)
                             except ValueError: pass
 
             except OSError:
-                rospy.logwarn("[BRIDGE] Serial terputus. Mencoba reconnect...")
                 if self.ser: self.ser.close()
                 time.sleep(2)
                 try:
                     port = rospy.get_param('~teensy_port', '/dev/ttyACM0')
                     baud = rospy.get_param('~teensy_baudrate', 115200)
                     self.ser = serial.Serial(port, baud, timeout=0.1)
-                    rospy.loginfo("[BRIDGE] Reconnect berhasil!")
                 except Exception: pass
             except Exception: pass
-            
-            # Tidur sebentar HANYA jika buffer sudah kosong (mencegah CPU Jetson 100%)
-            time.sleep(0.005)   
+                
+            time.sleep(0.01)
 
 if __name__ == '__main__':
     try:
