@@ -1,0 +1,2 @@
+
+-DCATKIN_DEVEL_PREFIX=/home/mapis/KKI26_WS/devel -DCMAKE_INSTALL_PREFIX=/home/mapis/KKI26_WS/install -G Unix Makefiles

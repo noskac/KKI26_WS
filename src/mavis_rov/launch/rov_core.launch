@@ -1,0 +1,32 @@
+<launch>
+    <!-- ========================================================== -->
+    <!-- GLOBAL PARAMETERS (Opsional: Mudah diganti tanpa ubah kode) -->
+    <!-- ========================================================== -->
+    <param name="teensy_port" value="/dev/ttyACM0" />
+    <param name="teensy_baudrate" value="115200" />
+    <param name="kamera_utama_index" value="0" />
+
+    <!-- ========================================================== -->
+    <!-- NODE 1: Thruster Bridge (Komunikasi ke Teensy & Mode)      -->
+    <!-- ========================================================== -->
+    <node pkg="mavis_rov" type="thruster_bridge.py" name="thruster_bridge_node" output="screen">
+        <!-- output="screen" berguna agar print() dari node ini muncul di terminal -->
+    </node>
+
+    <!-- ========================================================== -->
+    <!-- NODE 2: QR Scanner (Pembaca Kamera & Deteksi QR)           -->
+    <!-- ========================================================== -->
+    <node pkg="mavis_rov" type="QR_Scan.py" name="qr_scanner_node" output="screen" />
+
+    <!-- ========================================================== -->
+    <!-- NODE 3: Auto AI (Pemroses Data untuk Navigasi Otomatis)    -->
+    <!-- ========================================================== -->
+    <!-- <node pkg="mavis_rov" type="auto_ai.py" name="auto_ai_node" output="screen" /> -->
+
+    <!-- ========================================================== -->
+    <!-- NODE 4: Dashboard GUI (Mission Control)                    -->
+    <!-- ========================================================== -->
+    <node pkg="mavis_rov" type="ROV_GUI.py" name="rov_gui_node" output="screen" />
+
+</launch>
+
